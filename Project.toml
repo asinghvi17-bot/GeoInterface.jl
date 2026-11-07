@@ -9,6 +9,7 @@ Extents = "411431e0-e8b7-467b-b5e0-f676ba4f2910"
 GeoFormatTypes = "68eda718-8dee-11e9-39e7-89f7f65f511f"
 
 [weakdeps]
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 RecipesBase = "3cdcf5f2-1ef4-517c-9805-6587b60abb01"
 Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
@@ -16,6 +17,7 @@ GeometryBasics = "5c1252a2-5f33-56bf-86c9-59e7332b4326"
 [extensions]
 GeoInterfaceRecipesBaseExt = "RecipesBase"
 GeoInterfaceMakieExt = ["Makie", "GeometryBasics"]
+GeoInterfaceCairoMakieExt = ["CairoMakie", "Makie", "GeometryBasics"]
 
 [compat]
 DataAPI = "1"

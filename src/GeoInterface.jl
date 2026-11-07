@@ -57,6 +57,7 @@ include("utils.jl")
 include("base.jl")
 include("wrappers.jl")
 include("metadata.jl")
+include("curves.jl")
 include("plotting.jl")
 
 using .Wrappers

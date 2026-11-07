@@ -7,11 +7,14 @@ import GeoInterface as GI
 # Functions called from the macro in GeoInterface 
 GI._makie_plottype(geom) = _plottype_from_geomtrait(GI.geomtrait(geom))
 function GI._makie_convert_arguments(t, geom)::Tuple
+    GI._hascurves(geom) && return _convert_curve_arguments(t, geom)
     geob = GI.convert(GB, geom)
     return Makie.convert_arguments(t, geob)
 end
 function GI._makie_convert_array_arguments(plottrait, geoms::AbstractArray{T})::Tuple where T
     geoms_without_missings = Missing <: T ? skipmissing(geoms) : geoms
+    any(GI._hascurves, geoms_without_missings) &&
+        return _convert_curve_array_arguments(plottrait, geoms_without_missings)
     # assess whether multification is needed!
     # Multification is the conversion of a vector of mixed single and multi-geometry types,
     # like [::PolygonTrait, ::MultiPolygonTrait, ::PolygonTrait, ...], to the higher multi-
@@ -56,6 +59,9 @@ end
 function _plottype_from_geomtrait(::Union{GI.GeometryCollectionTrait,GI.PolygonTrait,GI.MultiPolygonTrait,GI.LinearRingTrait})
     Makie.Poly
 end
+# Curved geometries, see curves.jl
+_plottype_from_geomtrait(::Union{GI.CircularStringTrait,GI.CompoundCurveTrait,GI.MultiCurveTrait}) = CurveLines
+_plottype_from_geomtrait(::Union{GI.CurvePolygonTrait,GI.MultiSurfaceTrait}) = Makie.Poly
 
 function _operator_nangeom_if_missing_or_func(func, trait::GI.AbstractGeometryTrait, ndims; numtype=Float64)
     nan_geom = _nan_geom(trait, ndims, numtype)
@@ -171,6 +177,8 @@ to_multipoint(::GI.MultiPointTrait, geom) = GI.convert(GB, geom)
 # TODO 
 # Features and Feature collections
 # https://github.com/JuliaGeo/GI.jl/pull/72#issue-1406325596
+
+include("makie_curves.jl")
 
 # Enable Makie.jl for GI wrappers
 GI.@enable_makie Makie GI.WrapperGeometry
