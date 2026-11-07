@@ -29,7 +29,7 @@ import ..GeoInterface: AbstractGeometryTrait, PointTrait, LineTrait, LineStringT
 
 import ..GeoInterface: isgeometry, isfeature, isfeaturecollection, is3d, ismeasured,
        trait, geomtrait, convert, x, y, z, m, extent, crs,
-       getgeom, getpoint, getring, gethole, getcoord,
+       getgeom, getpoint, getring, gethole, getcoord, coordinates,
        ngeom, npoint, nring, nhole, ncoord,
        nfeature, getfeature, geometry, properties
 
@@ -201,12 +201,16 @@ for (geomtype, trait, childtype, child_trait, length_check, nesting) in (
             end
             str *= "("
             limited = get(io, :limit, false)
+            # keep track of how much space we've used + make sure we give this info to any child geoms so they don't go over the limit
+            currently_used_space = textwidth(str) + textwidth(extent_str) + textwidth(crs_str)
+            # a foreign geometry with its own display is shown as is, if that fits
+            own_str = (compact || limited) ? _own_str(parent(geom), screen_ncols - currently_used_space - 1) : nothing
             indexed = (compact || limited) && isgeometry(T)
             children = indexed ? nothing : getgeom(trait(geom), geom)
             child(i) = indexed ? getgeom(geom, i) : children[i]
-            # keep track of how much space we've used + make sure we give this info to any child geoms so they don't go over the limit
-            currently_used_space = textwidth(str) + textwidth(extent_str) + textwidth(crs_str)
-            if indexed || children isa AbstractVector
+            if !isnothing(own_str)
+                str *= own_str
+            elseif indexed || children isa AbstractVector
                 n = indexed ? ngeom(geom) : length(children)
                 str *= _children_str(child, n, compact, limited, screen_ncols - currently_used_space)
             else
@@ -293,8 +297,10 @@ function _children_str(child, n, compact, limited, width)
         geom = child(i)
         if (compact || limited) && !(geom isa WrapperGeometry) && isgeometry(geom)
             t = geomtrait(geom)
+            own = t isa PointTrait ? nothing : _own_str(geom, child_width)
+            isnothing(own) || return own
             if !(t isa PointTrait) && applicable(geointerface_geomtype, t)
-                name = string(geointerface_geomtype(t))
+                name = string(nameof(typeof(geom)))
                 remaining = child_width - textwidth(name) - 2
                 nchildren = ngeom(t, geom)
                 nchildren == 0 && return name * "([])"
@@ -324,7 +330,52 @@ function _children_str(child, n, compact, limited, width)
     return "[" * join(parts, "," * spacing) * "]"
 end
 
+# Stop writing once more than `left` bytes are written, so showing a huge geometry stays cheap.
+struct _BudgetExceeded <: Exception end
+mutable struct _BudgetIO <: IO
+    buf::IOBuffer
+    left::Int
+end
+function Base.unsafe_write(io::_BudgetIO, p::Ptr{UInt8}, n::UInt)
+    n > io.left && throw(_BudgetExceeded())
+    io.left -= n
+    return unsafe_write(io.buf, p, n)
+end
+Base.write(io::_BudgetIO, x::UInt8) = unsafe_write(io, Ref(x), UInt(1))
+
+_has_own_show(::Type{T}) where T =
+    !(T <: Union{WrapperGeometry,AbstractArray,Tuple,NamedTuple}) && isgeometry(T) &&
+        (Base.moduleroot(parentmodule(which(show, Tuple{IO,MIME"text/plain",T}))) !== Base ||
+         Base.moduleroot(parentmodule(which(show, Tuple{IO,T}))) !== Base)
+
+# Every child takes at least one character, so skip looking at the display of geometries with too many.
+_may_fit(::PointTrait, geom, width) = true
+function _may_fit(t, geom, width)
+    n = ngeom(t, geom)
+    return n <= width && (n == 0 || (child = getgeom(t, geom, 1); _may_fit(geomtrait(child), child, width)))
+end
+
+# The text/plain display of a foreign geometry if it has its own and fits in `width`, else `nothing`.
+# It is not shown compactly: for e.g. LibGEOS that is just `Polygon(...)`.
+function _own_str(geom, width::Int)
+    width > 0 && _has_own_show(typeof(geom)) && _may_fit(geomtrait(geom), geom, width) || return nothing
+    io = _BudgetIO(IOBuffer(), width)
+    try
+        show(IOContext(io, :limit => true, :displaysize => (24, width)), MIME"text/plain"(), geom)
+    catch e
+        e isa _BudgetExceeded || rethrow()
+        return nothing
+    end
+    str = String(take!(io.buf))
+    return '\n' in str ? nothing : str
+end
+
+# foreign points are shown as coordinates, as their compact display may not show them
 function _nice_geom_str(geom, show_mz::Bool, compact::Bool, width::Int, limited::Bool)
+    if (compact || limited) && !(geom isa Union{Tuple,NamedTuple}) && isgeometry(geom) &&
+       geomtrait(geom) isa PointTrait && ncoord(geom) > 0
+        return repr(Tuple(coordinates(geom)); context = :compact => compact)
+    end
     buf = IOBuffer()
     io = compact || limited ? IOContext(buf, :compact => compact, :limit => limited, :displaysize => (24, max(1, width))) : buf
     show(io, MIME"text/plain"(), geom)

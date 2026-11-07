@@ -502,10 +502,10 @@ end
     makepolygon(points) = GI.Polygon(CountedDisplayGeometry(GI.PolygonTrait(),
         [CountedDisplayGeometry(GI.LinearRingTrait(), points, reads)], reads))
     small = makepolygon(points)
-    native = GI.Polygon([GI.LinearRing(points)])
+    own = display_with(parent(small), :limit => false)
     for compact in (false, true)
         props = (:displaysize => (24, 80), :limit => true, :compact => compact)
-        @test display_with(small, props...) == display_with(native, props...)
+        @test endswith(display_with(small, props...), "(" * own * ")")
     end
     @test occursin("foreign(", display_with(small, :limit => false, :compact => false))
 
@@ -524,7 +524,7 @@ end
 
     for props in ((:compact => true,), (:limit => true,))
         collection = display_with(GI.GeometryCollection([MyCollection()]), props...)
-        @test occursin("GeometryCollection([LineString(", collection)
+        @test occursin("([MyCollection(", collection)
         @test occursin("MyEmptyPoint", display_with(GI.MultiPoint([MyEmptyPoint()]), props...))
     end
 
@@ -538,5 +538,65 @@ end
     @test reads[] < 32
 
     empty = GI.Polygon(CountedDisplayGeometry(GI.PolygonTrait(), [], reads))
-    @test endswith(display_with(empty, :limit => true), "([])")
+    @test endswith(display_with(empty, :limit => true), "(foreign())")
+end
+
+# A foreign geometry that displays like LibGEOS: WKT, but just `Type(...)` in compact mode.
+struct WKTLikeGeometry{T,C}
+    children::C
+end
+WKTLikeGeometry(t, children) = WKTLikeGeometry{typeof(t),typeof(children)}(children)
+GI.isgeometry(::Type{<:WKTLikeGeometry}) = true
+GI.geomtrait(::WKTLikeGeometry{T}) where T = T()
+GI.ngeom(::GI.AbstractGeometryTrait, g::WKTLikeGeometry) = length(g.children)
+GI.getgeom(::GI.AbstractGeometryTrait, g::WKTLikeGeometry, i) = g.children[i]
+GI.ncoord(::GI.AbstractGeometryTrait, ::WKTLikeGeometry) = 2
+GI.getcoord(::GI.PointTrait, g::WKTLikeGeometry, i) = g.children[i]
+wkt(g::WKTLikeGeometry{GI.PointTrait}) = join(g.children, " ")
+wkt(g::WKTLikeGeometry{GI.LinearRingTrait}) = "(" * join(wkt.(g.children), ", ") * ")"
+wkt(g::WKTLikeGeometry{GI.PolygonTrait}) = "POLYGON (" * join(wkt.(g.children), ", ") * ")"
+function Base.show(io::IO, ::MIME"text/plain", g::WKTLikeGeometry{T}) where T
+    if get(io, :compact, false)
+        print(io, replace(string(nameof(T)), "Trait" => ""), "(...)")
+    else
+        print(io, wkt(g))
+    end
+end
+
+@testset "wrapped geometries with their own display" begin
+    display_with(g, props...) = sprint(io -> show(IOContext(io, props...), MIME"text/plain"(), g))
+    wktpoints(ps) = WKTLikeGeometry.(Ref(GI.PointTrait()), ps)
+    makepolygon(ps) = WKTLikeGeometry(GI.PolygonTrait(), [WKTLikeGeometry(GI.LinearRingTrait(), wktpoints(ps))])
+    triangle = GI.Polygon(makepolygon([(0, 0), (1, 0), (1, 1), (0, 0)]))
+    wkt_triangle = "POLYGON ((0 0, 1 0, 1 1, 0 0))"
+
+    for props in ((:limit => true,), (:limit => true, :displaysize => (24, 80)), (:compact => true,))
+        @test occursin(wkt_triangle, display_with(triangle, props...))
+    end
+    @test display_with(triangle, :limit => true) == "Polygon{false, false}($wkt_triangle)"
+    @test display_with(triangle, :limit => true, :compact => true) == "Polygon($wkt_triangle)"
+    # inside containers, which show elements compactly
+    for container in ([triangle], [triangle triangle], Dict(:a => triangle), (a = triangle,))
+        @test occursin(wkt_triangle, sprint(show, MIME"text/plain"(), container; context = :displaysize => (24, 120)))
+    end
+    # a geometry that does not fit is bounded, without foreign wrapper type names or `Point(...)`
+    for props in ((:limit => true,), (:compact => true,))
+        shown = display_with(triangle, :displaysize => (24, 16), props...)
+        @test !occursin(wkt_triangle, shown)
+        @test !occursin("(...)", shown)
+        @test !occursin("Wrappers.LinearRing", shown)
+        @test occursin("[WKTLikeGeometry(", shown)
+        @test occursin("…", shown)
+    end
+    # large geometries are not rendered in full
+    large = GI.Polygon(makepolygon(fill((1, 2), 20_000)))
+    for props in ((:limit => true,), (:compact => true,))
+        shown = display_with(large, :displaysize => (24, 80), props...)
+        @test length(shown) < 140
+        @test occursin("…", shown)
+    end
+    @test length(sprint(show, MIME"text/plain"(), fill(large, 218); context = (:displaysize => (24, 80), :limit => true))) < 30_000
+    # plain vector wrappers are not affected
+    @test display_with(GI.Polygon([[(0, 0), (1, 0), (1, 1), (0, 0)]]), :limit => true) ==
+        "Polygon{false, false}([LinearRing([(0, 0), (1, 0), (1, 1), (0, 0)])])"
 end
