@@ -293,7 +293,6 @@ end
 # The string for `n` children, and its width if the children were labeled with the name of a wrapper. How
 # many children are shown, and so read, depends on that width, not on the label or display that is used.
 function _children_str(child, n, compact, limited, width)
-    n = Int(n) # backends may count with other integer types
     n == 0 && return "[]", 2
     spacing = compact ? "" : " "
     available = width - 2 # brackets
@@ -370,11 +369,11 @@ end
 # whether a display fits only looks at those.
 mutable struct _Node
     geom::Any
-    children::Union{Nothing,Dict{Int,_Node}}
+    children::Union{Nothing,Dict{Integer,_Node}}
 end
 _Node(geom) = _Node(geom, nothing)
-function _child!(node::_Node, i::Int)
-    isnothing(node.children) && (node.children = Dict{Int,_Node}())
+function _child!(node::_Node, i::Integer)
+    isnothing(node.children) && (node.children = Dict{Integer,_Node}())
     return get!(() -> _Node(getgeom(geomtrait(node.geom), node.geom, i)), node.children, i)
 end
 
@@ -407,10 +406,9 @@ end
 # it fits, or a display that does not work here, is not an error: the bounded display is used.
 function _own_str(node::_Node, width::Int)
     try
-        width > 0 && _may_fit(node, width) || return nothing
+        width > 0 && _may_fit(node, width) && _has_own_show(typeof(node.geom)) || return nothing
         str = sprint(show, MIME"text/plain"(), node.geom; context = (:limit => true, :displaysize => (24, width)))
-        # looking for a display is slower than showing, so only do so for what fits
-        return textwidth(str) <= width && !('\n' in str) && _has_own_show(typeof(node.geom)) ? str : nothing
+        return textwidth(str) <= width && !('\n' in str) ? str : nothing
     catch e
         e isa InterruptException && rethrow()
         return nothing

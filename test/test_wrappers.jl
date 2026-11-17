@@ -672,6 +672,20 @@ GI.ngeom(::GI.LineStringTrait, ::UIntLine) = UInt(3)
 GI.ncoord(::GI.LineStringTrait, ::UIntLine) = 2
 GI.getgeom(::GI.LineStringTrait, ::UIntLine, i::Integer) = (Float64(i), 2.0)
 
+# A line with a field that is not geometry, and one with more children than an `Int` counts
+struct SourceLine; source::String; end
+GI.isgeometry(::Type{SourceLine}) = true
+GI.geomtrait(::SourceLine) = GI.LineStringTrait()
+GI.ngeom(::GI.LineStringTrait, ::SourceLine) = 2
+GI.ncoord(::GI.LineStringTrait, ::SourceLine) = 2
+GI.getgeom(::GI.LineStringTrait, ::SourceLine, i) = (Float64(i), 2.0)
+struct CountedLine end
+GI.isgeometry(::Type{CountedLine}) = true
+GI.geomtrait(::CountedLine) = GI.LineStringTrait()
+GI.ngeom(::GI.LineStringTrait, ::CountedLine) = UInt(typemax(Int)) + 1
+GI.ncoord(::GI.LineStringTrait, ::CountedLine) = 2
+GI.getgeom(::GI.LineStringTrait, ::CountedLine, i::Integer) = (0.0, 0.0)
+
 struct XYPoint
     x::Float64
     y::Float64
@@ -828,6 +842,16 @@ Base.show(io::IO, ::MIME"text/plain", p::XYPoint) = print(io, "XYPoint(", p.x, "
     for props in ((:limit => true,), (:compact => true,))
         @test occursin("(3.0", display_with(GI.LineString(UIntLine()), :displaysize => (24, 120), props...))
     end
+
+    for props in ((:limit => true,), (:compact => true,))
+        @test occursin("…", display_with(GI.LineString(CountedLine()), :displaysize => (24, 120), props...))
+    end
+    # a geometry without a display of its own is not formatted to see whether that fits
+    small, big = GI.LineString(SourceLine("x")), GI.LineString(SourceLine("x"^1_000_000))
+    show_limited(x) = display_with(x, :limit => true, :displaysize => (24, 120))
+    show_limited(small); show_limited(big)
+    @test @allocated(show_limited(big)) < 2 * @allocated(show_limited(small))
+    @test show_limited(big) == show_limited(small)
 
     # and a point of which the coordinates cannot be given by index is shown by itself
     for props in ((:limit => true,), (:compact => true,)), x in (GI.MultiPoint([XYPoint(1, 2)]), GI.GeometryCollection([XYPoint(1, 2)]))
