@@ -22,7 +22,7 @@ module Wrappers
 
 import Extents
 
-import ..GeoInterface: AbstractGeometryTrait, PointTrait, LineTrait, LineStringTrait, LinearRingTrait,
+import ..GeoInterface: AbstractGeometryTrait, AbstractMultiPointTrait, PointTrait, LineTrait, LineStringTrait, LinearRingTrait,
        MultiPointTrait, PolygonTrait, MultiLineStringTrait, MultiCurveTrait, MultiPolygonTrait,
        AbstractCurveTrait, GeometryCollectionTrait, FeatureTrait, FeatureCollectionTrait, PointTuple3,
        PolyhedralSurfaceTrait, TriangleTrait, QuadTrait, PentagonTrait, HexagonTrait, RectangleTrait, TINTrait
@@ -205,17 +205,16 @@ for (geomtype, trait, childtype, child_trait, length_check, nesting) in (
             currently_used_space = textwidth(str) + textwidth(extent_str) + textwidth(crs_str)
             indexed = (compact || limited) && isgeometry(T)
             children = indexed ? nothing : getgeom(trait(geom), geom)
-            # a foreign geometry with its own display is shown as is, if that fits
             root = indexed ? _Node(parent(geom)) : nothing
             # a foreign geometry is read to show it, so do not use more than a wide display allows
             available_space = indexed ? min(screen_ncols, MAX_FOREIGN_WIDTH) - currently_used_space : screen_ncols - currently_used_space
-            own_str = indexed ? _own_str(root, available_space - 1) : nothing
             child(i) = indexed ? _child!(root, i) : _Node(children[i])
-            if !isnothing(own_str)
-                str *= own_str
-            elseif indexed || children isa AbstractVector
+            if indexed || children isa AbstractVector
                 n = indexed ? ngeom(geom) : length(children)
-                str *= _children_str(child, n, compact, limited, available_space)
+                bounded = _children_str(child, n, compact, limited, available_space)
+                # a foreign geometry with its own display is shown as is, if that fits
+                own_str = indexed ? _own_str(root, available_space - 1) : nothing
+                str *= something(own_str, bounded)
             else
                 str *= _nice_geom_str(parent(geom), false, compact, screen_ncols - currently_used_space, limited)
             end
@@ -302,17 +301,23 @@ function _children_str(child, n, compact, limited, width)
         if (compact || limited) && !(geom isa WrapperGeometry) && isgeometry(geom)
             t = geomtrait(geom)
             if !(t isa PointTrait)
-                own = _own_str(node, child_width)
-                isnothing(own) || return own
                 name = _kind_name(t, geom)
-                t isa AbstractGeometryTrait || return name * "(…)"
-                remaining = child_width - textwidth(name) - 2
-                nchildren = ngeom(t, geom)
-                nchildren == 0 && return name * "([])"
-                remaining <= 2 && return name * "(…)"
-                children = _children_str(k -> _child!(node, k), nchildren,
-                    compact, limited, remaining)
-                return name * "(" * children * ")"
+                if !applicable(geointerface_geomtype, t)
+                    # not a kind we wrap: reading its children may not be supported
+                    bounded = name * "(…)"
+                else
+                    # read children as far as when printing the (longer) wrapper name, so not more than a wrapper would
+                    remaining = child_width - textwidth(string(geointerface_geomtype(t))) - 2
+                    nchildren = ngeom(t, geom)
+                    bounded = if nchildren == 0
+                        name * "([])"
+                    elseif remaining <= 2
+                        name * "(…)"
+                    else
+                        name * "(" * _children_str(k -> _child!(node, k), nchildren, compact, limited, remaining) * ")"
+                    end
+                end
+                return something(_own_str(node, child_width), bounded)
             end
         end
         return _nice_geom_str(geom, false, compact, child_width, limited)
@@ -371,7 +376,8 @@ function _has_own_show(::Type{T}) where T
 end
 
 # A geometry and the children of it read so far. Reading a child can be expensive (LibGEOS copies it),
-# so within one `show` the check whether a display fits and the bounded display share the children read.
+# so within one `show` only the children the bounded display needs are read, and the check
+# whether a display fits only looks at those.
 mutable struct _Node
     geom::Any
     children::Union{Nothing,Dict{Int,_Node}}
@@ -382,9 +388,11 @@ function _child!(node::_Node, i::Int)
     return get!(() -> _Node(getgeom(geomtrait(node.geom), node.geom, i)), node.children, i)
 end
 
-# Every geometry takes at least one character, so a geometry with more than `width` of them, counted
-# over all siblings and nesting levels, cannot fit. The budget is shared and used up before reading children.
-# It is capped, so a very wide display does not make us read (and a backend copy) very large geometries.
+# Whether a geometry that is shown has at most `width` geometries, counting all siblings and nesting
+# levels, each as at least one character. This only uses what has been read and counts, as reading a
+# child of a foreign geometry can copy all of it. So a geometry of which children were not all shown is not
+# known to be small. Curves and multipoints have points as children, which do not have to be read.
+# The count is capped, so a very wide display does not let us print very large geometries in full.
 const MAX_FIT_GEOMETRIES = 256
 const MAX_FOREIGN_WIDTH = 1000
 _may_fit(node::_Node, width::Int) = _may_fit!(Ref(min(width, MAX_FIT_GEOMETRIES)), node)
@@ -395,13 +403,28 @@ function _may_fit!(budget, node::_Node)
     t isa AbstractGeometryTrait || return false
     n = ngeom(t, node.geom)
     n <= budget[] || return false
-    return all(i -> _may_fit!(budget, _child!(node, i)), 1:n)
+    if t isa Union{AbstractCurveTrait,AbstractMultiPointTrait}
+        budget[] -= n
+        return true
+    end
+    n == 0 && return true
+    children = node.children
+    return !isnothing(children) && length(children) == n && all(i -> _may_fit!(budget, children[i]), 1:n)
+end
+
+# Not being able to tell, for example as a backend does not support counting, is not an error.
+function _may_fit_safely(node::_Node, width::Int)
+    try
+        return _may_fit(node, width)
+    catch
+        return false
+    end
 end
 
 # The text/plain display of a foreign geometry if it has its own and fits in `width`, else `nothing`.
 # It is not shown compactly: for e.g. LibGEOS that is just `Polygon(...)`.
 function _own_str(node::_Node, width::Int)
-    width > 0 && _has_own_show(typeof(node.geom)) && _may_fit(node, width) || return nothing
+    width > 0 && _has_own_show(typeof(node.geom)) && _may_fit_safely(node, width) || return nothing
     io = _BudgetIO(IOBuffer(), width)
     try
         show(IOContext(io, :limit => true, :displaysize => (24, width)), MIME"text/plain"(), node.geom)

@@ -711,13 +711,38 @@ Base.show(io::IO, ::MIME"text/plain", ::MultilineGeometry) = print(io, "first li
         end
     end
 
-    # a very wide display does not make the check read huge geometries
+    # children that are not shown are not read, even if the one that is not shown is huge
+    items = Any[line(2), line(2), line(2), line(2), line(100_000), line(2), line(2), line(2), line(2), line(2)]
+    elided = GI.MultiLineString(EagerGeometry(GI.MultiLineStringTrait(), items, reads))
+    tree = line(100_000)
+    for _ in 1:20
+        tree = EagerGeometry(GI.GeometryCollectionTrait(), Any[tree], reads)
+    end
+    nested = GI.GeometryCollection([tree])
+    for props in ((:limit => true,), (:compact => true,))
+        empty!(eager_reads_per_child); reads[] = 0
+        display_with(elided, :displaysize => (24, ncols), props...)
+        @test !isempty(eager_reads_per_child)
+        @test !haskey(eager_reads_per_child, (objectid(items), 5))
+        @test count(k -> first(k) == objectid(items), keys(eager_reads_per_child)) <= 4 # only those shown
+        reads[] = 0
+        display_with(nested, :displaysize => (24, ncols), props...)
+        @test reads[] < 4
+    end
+
+    # a very wide display does not make the check accept huge geometries, and the check does not read children
     node(g) = GeoInterface.Wrappers._Node(g)
     cap = GeoInterface.Wrappers.MAX_FIT_GEOMETRIES
+    ringnode(n) = node(EagerGeometry(GI.LinearRingTrait(), fill((1, 2), n), reads))
     reads[] = 0
-    @test isnothing(GeoInterface.Wrappers._own_str(node(polygon(20_000)), 100_000))
-    @test reads[] < 2cap
-    @test GeoInterface.Wrappers._own_str(node(polygon(3)), 100_000) == eager_wkt(polygon(3))
+    @test GeoInterface.Wrappers._may_fit(ringnode(cap ÷ 2), 100_000)
+    @test !GeoInterface.Wrappers._may_fit(ringnode(2cap), 100_000)
+    @test reads[] == 0
+    # of a geometry of which children were not read, only the count is known
+    smallpolygon = node(polygon(3))
+    @test !GeoInterface.Wrappers._may_fit(smallpolygon, 100_000)
+    GeoInterface.Wrappers._child!(smallpolygon, 1)
+    @test GeoInterface.Wrappers._own_str(smallpolygon, 100_000) == eager_wkt(polygon(3))
     maxwidth = GeoInterface.Wrappers.MAX_FOREIGN_WIDTH
     for props in ((:limit => true,), (:compact => true,))
         reads[] = 0
