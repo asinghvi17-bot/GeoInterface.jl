@@ -645,6 +645,24 @@ GI.getgeom(::GI.AbstractGeometryTrait, g::MultilineGeometry, i) = g.children[i]
 GI.ncoord(::GI.AbstractGeometryTrait, ::MultilineGeometry) = 2
 Base.show(io::IO, ::MIME"text/plain", ::MultilineGeometry) = print(io, "first line\nsecond line")
 
+# A foreign geometry whose display depends on the IO, or fails
+struct ModalGeometry{T,C}
+    children::C
+    mode::Symbol
+end
+ModalGeometry(t, children, mode) = ModalGeometry{typeof(t),typeof(children)}(children, mode)
+GI.isgeometry(::Type{<:ModalGeometry}) = true
+GI.geomtrait(::ModalGeometry{T}) where T = T()
+GI.ngeom(::GI.AbstractGeometryTrait, g::ModalGeometry) = length(g.children)
+GI.getgeom(::GI.AbstractGeometryTrait, g::ModalGeometry, i) = g.children[i]
+GI.ncoord(::GI.AbstractGeometryTrait, ::ModalGeometry) = 2
+GI.isempty(::GI.PointTrait, g::ModalGeometry) = g.mode == :empty
+function Base.show(io::IO, ::MIME"text/plain", g::ModalGeometry)
+    g.mode == :throws && error("no display here")
+    g.mode == :isopen && !isopen(io) && error("closed")
+    print(io, g.mode == :empty ? "EMPTY POINT" : "OWN DISPLAY")
+end
+
 @testset "bounded work for wrapped geometries with an eager display" begin
     reads = Ref(0)
     display_with(g, props...) = sprint(io -> show(IOContext(io, props...), MIME"text/plain"(), g))
@@ -730,6 +748,15 @@ Base.show(io::IO, ::MIME"text/plain", ::MultilineGeometry) = print(io, "first li
         @test reads[] < 4
     end
 
+    # which children are read does not depend on the labels or displays, or on the names that are in scope
+    items = Any[line(2), line(100_000), line(2), line(2), line(2), line(2), line(2), line(2), line(2), line(2)]
+    hidden = GI.MultiLineString(EagerGeometry(GI.MultiLineStringTrait(), items, reads))
+    for props in ((:limit => true,), (:compact => true,)), cols in (60, 120)
+        empty!(eager_reads_per_child)
+        display_with(hidden, :displaysize => (24, cols), props...)
+        @test Set(i for ((id, i), _) in eager_reads_per_child if id == objectid(items)) == Set([1, 10])
+    end
+
     # a very wide display does not make the check accept huge geometries, and the check does not read children
     node(g) = GeoInterface.Wrappers._Node(g)
     cap = GeoInterface.Wrappers.MAX_FIT_GEOMETRIES
@@ -766,4 +793,28 @@ Base.show(io::IO, ::MIME"text/plain", ::MultilineGeometry) = print(io, "first li
     @test occursin("POLYGON ((0 0, 1 0, 1 1, 0 0))", wide) && occursin("extent", wide) && occursin("crs", wide)
     @test occursin("POLYGON", display_with(withextent, :limit => true, :displaysize => (24, textwidth(wide))))
     @test !occursin("POLYGON", display_with(withextent, :limit => true, :displaysize => (24, textwidth(wide) - 1)))
+
+    # a display that does not work on the IO used for it, or at all, is replaced by the bounded one
+    modal(mode) = GI.GeometryCollection([ModalGeometry(GI.LineStringTrait(), [(0, 0), (1, 1)], mode)])
+    @test occursin("OWN DISPLAY", display_with(modal(:isopen), :limit => true, :displaysize => (24, 120)))
+    for props in ((:limit => true,), (:compact => true,))
+        shown = display_with(modal(:throws), :displaysize => (24, 120), props...)
+        @test occursin("LineString([", shown)
+        @test !occursin("OWN DISPLAY", shown)
+    end
+
+    # an empty point has coordinates, but no values to show
+    emptypoint = ModalGeometry(GI.PointTrait(), (0, 0), :empty)
+    for props in ((:limit => true,), (:compact => true,))
+        shown = display_with(GI.MultiPoint([emptypoint]), :displaysize => (24, 120), props...)
+        @test occursin("EMPTY POINT", shown)
+        @test !occursin("(0", shown)
+    end
+
+    # a display without a width, as PrettyTables has, is limited like a wide display
+    unlimited = (:limit => true, :displaysize => (-1, -1))
+    @test occursin("OWN DISPLAY", display_with(modal(:isopen), unlimited...))
+    shown = display_with(GI.Polygon(polygon(20_000)), unlimited...)
+    @test length(shown) < 2maxwidth
+    @test occursin(eager_wkt(polygon(3)), display_with(GI.Polygon(polygon(3)), unlimited...))
 end

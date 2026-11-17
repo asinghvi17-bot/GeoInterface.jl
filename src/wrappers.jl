@@ -27,6 +27,7 @@ import ..GeoInterface: AbstractGeometryTrait, AbstractMultiPointTrait, PointTrai
        AbstractCurveTrait, GeometryCollectionTrait, FeatureTrait, FeatureCollectionTrait, PointTuple3,
        PolyhedralSurfaceTrait, TriangleTrait, QuadTrait, PentagonTrait, HexagonTrait, RectangleTrait, TINTrait
 
+import ..GeoInterface: isempty as isemptygeom
 import ..GeoInterface: isgeometry, isfeature, isfeaturecollection, is3d, ismeasured,
        trait, geomtrait, convert, x, y, z, m, extent, crs,
        getgeom, getpoint, getring, gethole, getcoord, coordinates,
@@ -207,11 +208,15 @@ for (geomtype, trait, childtype, child_trait, length_check, nesting) in (
             children = indexed ? nothing : getgeom(trait(geom), geom)
             root = indexed ? _Node(parent(geom)) : nothing
             # a foreign geometry is read to show it, so do not use more than a wide display allows
-            available_space = indexed ? min(screen_ncols, MAX_FOREIGN_WIDTH) - currently_used_space : screen_ncols - currently_used_space
+            # (a negative width, as PrettyTables passes, means there is no limit)
+            foreign = indexed || (children isa AbstractVector && !isempty(children) &&
+                !(first(children) isa Union{WrapperGeometry,Tuple,NamedTuple,AbstractVector}) && isgeometry(first(children)))
+            ncols = foreign ? (screen_ncols < 0 ? MAX_FOREIGN_WIDTH : min(screen_ncols, MAX_FOREIGN_WIDTH)) : screen_ncols
+            available_space = ncols - currently_used_space
             child(i) = indexed ? _child!(root, i) : _Node(children[i])
             if indexed || children isa AbstractVector
                 n = indexed ? ngeom(geom) : length(children)
-                bounded = _children_str(child, n, compact, limited, available_space)
+                bounded, _ = _children_str(child, n, compact, limited, available_space)
                 # a foreign geometry with its own display is shown as is, if that fits
                 own_str = indexed ? _own_str(root, available_space - 1) : nothing
                 str *= something(own_str, bounded)
@@ -290,8 +295,10 @@ for (geomtype, trait, childtype, child_trait, length_check, nesting) in (
     end
 end
 
+# The string for `n` children, and its width if the children were labeled with the name of a wrapper. How
+# many children are shown, and so read, depends on that width, not on the label or display that is used.
 function _children_str(child, n, compact, limited, width)
-    n == 0 && return "[]"
+    n == 0 && return "[]", 2
     spacing = compact ? "" : " "
     available = width - 2 # brackets
     child_width = fld(available, n)
@@ -304,40 +311,49 @@ function _children_str(child, n, compact, limited, width)
                 name = _kind_name(t, geom)
                 if !applicable(geointerface_geomtype, t)
                     # not a kind we wrap: reading its children may not be supported
-                    bounded = name * "(…)"
+                    bounded, bounded_width = name * "(…)", textwidth(name) + 3
                 else
-                    # read children as far as when printing the (longer) wrapper name, so not more than a wrapper would
-                    remaining = child_width - textwidth(string(geointerface_geomtype(t))) - 2
+                    label_width = textwidth(string(@__MODULE__, ".", nameof(geointerface_geomtype(t))))
+                    remaining = child_width - label_width - 2
                     nchildren = ngeom(t, geom)
-                    bounded = if nchildren == 0
-                        name * "([])"
+                    if nchildren == 0
+                        bounded, bounded_width = name * "([])", label_width + 4
                     elseif remaining <= 2
-                        name * "(…)"
+                        bounded, bounded_width = name * "(…)", label_width + 3
                     else
-                        name * "(" * _children_str(k -> _child!(node, k), nchildren, compact, limited, remaining) * ")"
+                        try
+                            children, children_width = _children_str(k -> _child!(node, k), nchildren, compact, limited, remaining)
+                            bounded, bounded_width = name * "(" * children * ")", label_width + children_width + 2
+                        catch e # a backend that does not give all its children
+                            e isa InterruptException && rethrow()
+                            bounded, bounded_width = name * "(…)", label_width + 3
+                        end
                     end
                 end
-                return something(_own_str(node, child_width), bounded)
+                return something(_own_str(node, child_width), bounded), bounded_width
             end
         end
-        return _nice_geom_str(geom, false, compact, child_width, limited)
+        shown = _nice_geom_str(geom, false, compact, child_width, limited)
+        return something(_coordinates_str(geom, compact, limited), shown), textwidth(shown)
     end
-    first_child = render(1)
-    n == 1 && return "[" * first_child * "]"
+    first_child, first_width = render(1)
+    n == 1 && return "[" * first_child * "]", first_width + 2
 
-    visible = clamp(fld(available - 1, max(1, textwidth(first_child))), 2, n)
+    visible = clamp(fld(available - 1, max(1, first_width)), 2, n)
     left, right = cld(visible, 2), fld(visible, 2)
-    parts = String[first_child]
+    rendered = [(first_child, first_width)]
     for i in 2:left
-        push!(parts, render(i))
+        push!(rendered, render(i))
     end
     if visible < n
-        push!(parts, "…$(spacing)($(n - visible))$(spacing)…$(spacing)")
+        elision = "…$(spacing)($(n - visible))$(spacing)…$(spacing)"
+        push!(rendered, (elision, textwidth(elision)))
     end
     for i in (n - right + 1):n
-        push!(parts, render(i))
+        push!(rendered, render(i))
     end
-    return "[" * join(parts, "," * spacing) * "]"
+    separator = "," * spacing
+    return "[" * join(first.(rendered), separator) * "]", 2 + sum(last, rendered) + (length(rendered) - 1) * textwidth(separator)
 end
 
 # The kind of a foreign geometry, also for traits without a wrapper such as `CircularStringTrait`.
@@ -358,6 +374,9 @@ function Base.unsafe_write(io::_BudgetIO, p::Ptr{UInt8}, n::UInt)
     io.left -= n
     return unsafe_write(io.buf, p, n)
 end
+Base.isopen(::_BudgetIO) = true
+Base.iswritable(::_BudgetIO) = true
+Base.isreadable(::_BudgetIO) = false
 function Base.write(io::_BudgetIO, x::UInt8)
     io.left < 1 && throw(_BudgetExceeded())
     io.left -= 1
@@ -416,7 +435,8 @@ end
 function _may_fit_safely(node::_Node, width::Int)
     try
         return _may_fit(node, width)
-    catch
+    catch e
+        e isa InterruptException && rethrow()
         return false
     end
 end
@@ -428,20 +448,23 @@ function _own_str(node::_Node, width::Int)
     io = _BudgetIO(IOBuffer(), width)
     try
         show(IOContext(io, :limit => true, :displaysize => (24, width)), MIME"text/plain"(), node.geom)
-    catch e
-        e isa _BudgetExceeded || rethrow()
+    catch e # too long, or a display that does not work here: use the bounded one
+        e isa InterruptException && rethrow()
         return nothing
     end
     str = String(take!(io.buf))
     return '\n' in str ? nothing : str
 end
 
-# foreign points are shown as coordinates, as their compact display may not show them
+# Foreign points are shown as coordinates, as their compact display may not show them (or is empty
+# for an empty point, which has a number of coordinates but no values).
+function _coordinates_str(geom, compact::Bool, limited::Bool)
+    (compact || limited) && !(geom isa Union{WrapperGeometry,Tuple,NamedTuple,AbstractVector}) && isgeometry(geom) &&
+        geomtrait(geom) isa PointTrait && ncoord(geom) > 0 && !isemptygeom(geom) || return nothing
+    return repr(Tuple(coordinates(geom)); context = :compact => compact)
+end
+
 function _nice_geom_str(geom, show_mz::Bool, compact::Bool, width::Int, limited::Bool)
-    if (compact || limited) && !(geom isa Union{Tuple,NamedTuple}) && isgeometry(geom) &&
-       geomtrait(geom) isa PointTrait && ncoord(geom) > 0
-        return repr(Tuple(coordinates(geom)); context = :compact => compact)
-    end
     buf = IOBuffer()
     io = compact || limited ? IOContext(buf, :compact => compact, :limit => limited, :displaysize => (24, max(1, width))) : buf
     show(io, MIME"text/plain"(), geom)
