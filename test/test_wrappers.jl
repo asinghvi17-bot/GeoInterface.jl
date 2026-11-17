@@ -686,6 +686,14 @@ GI.ngeom(::GI.LineStringTrait, ::CountedLine) = UInt(typemax(Int)) + 1
 GI.ncoord(::GI.LineStringTrait, ::CountedLine) = 2
 GI.getgeom(::GI.LineStringTrait, ::CountedLine, i::Integer) = (0.0, 0.0)
 
+# Collections that count with any integer type, of lines of many points
+struct CountedMulti{T} end
+GI.isgeometry(::Type{<:CountedMulti}) = true
+GI.geomtrait(::CountedMulti) = GI.MultiLineStringTrait()
+GI.ngeom(::GI.MultiLineStringTrait, ::CountedMulti{T}) where T = T(3)
+GI.ncoord(::GI.MultiLineStringTrait, ::CountedMulti) = 2
+GI.getgeom(::GI.MultiLineStringTrait, ::CountedMulti, i::Integer) = GI.LineString(fill((1.0, 2.0), 1000))
+
 struct XYPoint
     x::Float64
     y::Float64
@@ -845,6 +853,9 @@ Base.show(io::IO, ::MIME"text/plain", p::XYPoint) = print(io, "XYPoint(", p.x, "
 
     for props in ((:limit => true,), (:compact => true,))
         @test occursin("…", display_with(GI.LineString(CountedLine()), :displaysize => (24, 120), props...))
+    end
+    for T in (Int128, UInt128, BigInt), props in ((:limit => true,), (:compact => true,))
+        @test occursin("LineString(", display_with(GI.MultiLineString(CountedMulti{T}()), :displaysize => (24, 80), props...))
     end
     # a geometry without a display of its own is not formatted to see whether that fits
     small, big = GI.LineString(SourceLine("x")), GI.LineString(SourceLine("x"^1_000_000))

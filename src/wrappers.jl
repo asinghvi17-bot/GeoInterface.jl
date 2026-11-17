@@ -296,7 +296,7 @@ function _children_str(child, n, compact, limited, width)
     n == 0 && return "[]", 2
     spacing = compact ? "" : " "
     available = width - 2 # brackets
-    child_width = fld(available, n)
+    child_width = Int(fld(available, n)) # n may be any integer type, the width is at most `available`
     function render(i)
         node = child(i)
         geom = node.geom
