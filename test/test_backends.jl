@@ -56,4 +56,16 @@ import ArchGDAL, LibGEOS
             @test occursin(r"CircularString|CIRCULARSTRING", show_with(x, :displaysize => (24, cols), props...))
         end
     end
+
+    # counting the parts of a compound curve reads all of it, so that is not done to show it
+    @testset "ArchGDAL compound curves" begin
+        compound(n) = GI.MultiCurve([ArchGDAL.fromWKT("COMPOUNDCURVE (" * join(("($i 0,$(i + 1) 0)" for i in 1:n), ",") * ")")])
+        small, large = compound(100), compound(30_000)
+        for props in ((:limit => true,), (:compact => true,), (:limit => true, :compact => true))
+            @test occursin("CompoundCurve", show_with(large, :displaysize => (24, 160), props...))
+            show_with(small, props...); show_with(large, props...)
+            @test @allocated(show_with(large, :displaysize => (24, 160), props...)) < 2 * @allocated(show_with(small, :displaysize => (24, 160), props...))
+        end
+        @test fastest(() -> show_with(large, :displaysize => (24, 160), :limit => true)) < 20 * fastest(() -> show_with(small, :displaysize => (24, 160), :limit => true))
+    end
 end

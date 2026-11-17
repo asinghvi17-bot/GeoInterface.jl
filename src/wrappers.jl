@@ -389,7 +389,8 @@ function _may_fit!(budget, node::_Node)
     (budget[] -= 1) >= 0 || return false
     t = geomtrait(node.geom)
     t isa PointTrait && return true
-    t isa AbstractGeometryTrait || return false
+    # counting the children of a kind we do not wrap, such as a compound curve, can read all of it
+    t isa AbstractGeometryTrait && applicable(geointerface_geomtype, t) || return false
     n = ngeom(t, node.geom)
     n <= budget[] || return false
     if t isa Union{AbstractCurveTrait,AbstractMultiPointTrait}
