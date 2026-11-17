@@ -208,11 +208,7 @@ for (geomtype, trait, childtype, child_trait, length_check, nesting) in (
             children = indexed ? nothing : getgeom(trait(geom), geom)
             root = indexed ? _Node(parent(geom)) : nothing
             # a foreign geometry is read to show it, so do not use more than a wide display allows
-            # (a negative width, as PrettyTables passes, means there is no limit)
-            foreign = indexed || (children isa AbstractVector && !isempty(children) &&
-                !(first(children) isa Union{WrapperGeometry,Tuple,NamedTuple,AbstractVector}) && isgeometry(first(children)))
-            ncols = foreign ? (screen_ncols < 0 ? MAX_FOREIGN_WIDTH : min(screen_ncols, MAX_FOREIGN_WIDTH)) : screen_ncols
-            available_space = ncols - currently_used_space
+            available_space = (indexed ? min(screen_ncols, MAX_FOREIGN_WIDTH) : screen_ncols) - currently_used_space
             child(i) = indexed ? _child!(root, i) : _Node(children[i])
             if indexed || children isa AbstractVector
                 n = indexed ? ngeom(geom) : length(children)
@@ -321,13 +317,8 @@ function _children_str(child, n, compact, limited, width)
                     elseif remaining <= 2
                         bounded, bounded_width = name * "(…)", label_width + 3
                     else
-                        try
-                            children, children_width = _children_str(k -> _child!(node, k), nchildren, compact, limited, remaining)
-                            bounded, bounded_width = name * "(" * children * ")", label_width + children_width + 2
-                        catch e # a backend that does not give all its children
-                            e isa InterruptException && rethrow()
-                            bounded, bounded_width = name * "(…)", label_width + 3
-                        end
+                        children, children_width = _children_str(k -> _child!(node, k), nchildren, compact, limited, remaining)
+                        bounded, bounded_width = name * "(" * children * ")", label_width + children_width + 2
                     end
                 end
                 return something(_own_str(node, child_width), bounded), bounded_width
@@ -376,7 +367,6 @@ function Base.unsafe_write(io::_BudgetIO, p::Ptr{UInt8}, n::UInt)
 end
 Base.isopen(::_BudgetIO) = true
 Base.iswritable(::_BudgetIO) = true
-Base.isreadable(::_BudgetIO) = false
 function Base.write(io::_BudgetIO, x::UInt8)
     io.left < 1 && throw(_BudgetExceeded())
     io.left -= 1
@@ -431,37 +421,34 @@ function _may_fit!(budget, node::_Node)
     return !isnothing(children) && length(children) == n && all(i -> _may_fit!(budget, children[i]), 1:n)
 end
 
-# Not being able to tell, for example as a backend does not support counting, is not an error.
-function _may_fit_safely(node::_Node, width::Int)
-    try
-        return _may_fit(node, width)
-    catch e
-        e isa InterruptException && rethrow()
-        return false
-    end
-end
-
 # The text/plain display of a foreign geometry if it has its own and fits in `width`, else `nothing`.
-# It is not shown compactly: for e.g. LibGEOS that is just `Polygon(...)`.
+# It is not shown compactly: for e.g. LibGEOS that is just `Polygon(...)`. Not being able to tell whether
+# it fits, or a display that does not work here, is not an error: the bounded display is used.
 function _own_str(node::_Node, width::Int)
-    width > 0 && _has_own_show(typeof(node.geom)) && _may_fit_safely(node, width) || return nothing
-    io = _BudgetIO(IOBuffer(), width)
+    width > 0 && _has_own_show(typeof(node.geom)) || return nothing
     try
+        _may_fit(node, width) || return nothing
+        io = _BudgetIO(IOBuffer(), width)
         show(IOContext(io, :limit => true, :displaysize => (24, width)), MIME"text/plain"(), node.geom)
-    catch e # too long, or a display that does not work here: use the bounded one
+        str = String(take!(io.buf))
+        return '\n' in str ? nothing : str
+    catch e
         e isa InterruptException && rethrow()
         return nothing
     end
-    str = String(take!(io.buf))
-    return '\n' in str ? nothing : str
 end
 
 # Foreign points are shown as coordinates, as their compact display may not show them (or is empty
 # for an empty point, which has a number of coordinates but no values).
 function _coordinates_str(geom, compact::Bool, limited::Bool)
-    (compact || limited) && !(geom isa Union{WrapperGeometry,Tuple,NamedTuple,AbstractVector}) && isgeometry(geom) &&
-        geomtrait(geom) isa PointTrait && ncoord(geom) > 0 && !isemptygeom(geom) || return nothing
-    return repr(Tuple(coordinates(geom)); context = :compact => compact)
+    try
+        (compact || limited) && !(geom isa Union{WrapperGeometry,Tuple,NamedTuple,AbstractVector}) && isgeometry(geom) &&
+            geomtrait(geom) isa PointTrait && ncoord(geom) > 0 && !isemptygeom(geom) || return nothing
+        return repr(Tuple(coordinates(geom)); context = :compact => compact)
+    catch e # not all backends give coordinates by index: use their display
+        e isa InterruptException && rethrow()
+        return nothing
+    end
 end
 
 function _nice_geom_str(geom, show_mz::Bool, compact::Bool, width::Int, limited::Bool)

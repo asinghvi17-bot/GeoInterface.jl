@@ -663,6 +663,18 @@ function Base.show(io::IO, ::MIME"text/plain", g::ModalGeometry)
     print(io, g.mode == :empty ? "EMPTY POINT" : "OWN DISPLAY")
 end
 
+# A point of which a backend only gives x and y
+struct XYPoint
+    x::Float64
+    y::Float64
+end
+GI.isgeometry(::Type{XYPoint}) = true
+GI.geomtrait(::XYPoint) = GI.PointTrait()
+GI.ncoord(::GI.PointTrait, ::XYPoint) = 2
+GI.x(::GI.PointTrait, p::XYPoint) = p.x
+GI.y(::GI.PointTrait, p::XYPoint) = p.y
+Base.show(io::IO, ::MIME"text/plain", p::XYPoint) = print(io, "XYPoint(", p.x, ", ", p.y, ")")
+
 @testset "bounded work for wrapped geometries with an eager display" begin
     reads = Ref(0)
     display_with(g, props...) = sprint(io -> show(IOContext(io, props...), MIME"text/plain"(), g))
@@ -803,6 +815,11 @@ end
         @test !occursin("OWN DISPLAY", shown)
     end
 
+    # and a point of which the coordinates cannot be given by index is shown by itself
+    for props in ((:limit => true,), (:compact => true,)), x in (GI.MultiPoint([XYPoint(1, 2)]), GI.GeometryCollection([XYPoint(1, 2)]))
+        @test occursin("XYPoint(1.0, 2.0)", display_with(x, :displaysize => (24, 120), props...))
+    end
+
     # an empty point has coordinates, but no values to show
     emptypoint = ModalGeometry(GI.PointTrait(), (0, 0), :empty)
     for props in ((:limit => true,), (:compact => true,))
@@ -811,10 +828,11 @@ end
         @test !occursin("(0", shown)
     end
 
-    # a display without a width, as PrettyTables has, is limited like a wide display
-    unlimited = (:limit => true, :displaysize => (-1, -1))
-    @test occursin("OWN DISPLAY", display_with(modal(:isopen), unlimited...))
-    shown = display_with(GI.Polygon(polygon(20_000)), unlimited...)
-    @test length(shown) < 2maxwidth
-    @test occursin(eager_wkt(polygon(3)), display_with(GI.Polygon(polygon(3)), unlimited...))
+    # a display without a width, as PrettyTables has, is shown as bounded as with a width that is too small
+    for props in ((:limit => true,), (:compact => true,))
+        empty!(eager_reads_per_child)
+        shown = display_with(hidden, :displaysize => (-1, -1), props...)
+        @test Set(i for ((id, i), _) in eager_reads_per_child if id == objectid(items)) == Set([1, 10])
+        @test length(shown) < 200
+    end
 end

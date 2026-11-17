@@ -16,11 +16,10 @@ import ArchGDAL, LibGEOS
                 @test occursin("POLYGON ((0 0", show_with(x, :displaysize => (24, 120), :limit => true))
             end
 
-            # also without a width, as PrettyTables has, but not for large ones
+            # without a width, as PrettyTables has, it is as bounded as with a small one
             unlimited = (:limit => true, :displaysize => (-1, -1))
-            @test occursin("POLYGON ((0 0", show_with(triangle, unlimited...))
-            @test occursin("POLYGON ((0 0", show_with(GI.GeometryCollection([triangle]), unlimited...))
-            @test length(show_with(GI.Polygon(read("POLYGON (" * "(0 0," * join(("$(i % 7) $(i % 11)" for i in 1:20_000), ",") * ",0 0))")), unlimited...)) < 2000
+            @test length(show_with(triangle, unlimited...)) < 200
+            @test length(show_with(GI.Polygon(read("POLYGON (" * "(0 0," * join(("$(i % 7) $(i % 11)" for i in 1:20_000), ",") * ",0 0))")), unlimited...)) < 200
 
             # children that are not shown are not read, which would copy them
             multi = read("MULTILINESTRING(" * join([fill("(0 0,1 1)", 4); line(300_000); fill("(0 0,1 1)", 5)], ",") * ")")
