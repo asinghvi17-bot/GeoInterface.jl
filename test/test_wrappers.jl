@@ -610,14 +610,28 @@ EagerGeometry(t, children, reads) = EagerGeometry{typeof(t),typeof(children)}(ch
 GI.isgeometry(::Type{<:EagerGeometry}) = true
 GI.geomtrait(::EagerGeometry{T}) where T = T()
 GI.ngeom(::GI.AbstractGeometryTrait, g::EagerGeometry) = length(g.children)
+# Reads per child made by GeoInterface's display code, not by the geometry's own display.
+const eager_reads_per_child = Dict{Tuple{UInt,Int},Int}()
+const eager_in_own_display = Ref(false)
 function GI.getgeom(::GI.AbstractGeometryTrait, g::EagerGeometry, i)
     g.reads[] += 1
+    if !eager_in_own_display[]
+        key = (objectid(g.children), i)
+        eager_reads_per_child[key] = get(eager_reads_per_child, key, 0) + 1
+    end
     return g.children[i]
 end
 GI.ncoord(::GI.AbstractGeometryTrait, ::EagerGeometry) = 2
 eager_wkt(g::EagerGeometry) = string(replace(string(nameof(typeof(GI.geomtrait(g)))), "Trait" => ""), "(", join(eager_wkt.(GI.getgeom(g)), ", "), ")")
 eager_wkt(p) = join(p, " ")
-Base.show(io::IO, ::MIME"text/plain", g::EagerGeometry) = print(io, eager_wkt(g))
+function Base.show(io::IO, ::MIME"text/plain", g::EagerGeometry)
+    eager_in_own_display[] = true
+    try
+        print(io, eager_wkt(g))
+    finally
+        eager_in_own_display[] = false
+    end
+end
 
 @testset "bounded work for wrapped geometries with an eager display" begin
     reads = Ref(0)
@@ -640,6 +654,14 @@ Base.show(io::IO, ::MIME"text/plain", g::EagerGeometry) = print(io, eager_wkt(g)
         @test length(shown) < 2ncols
     end
 
+    # every child is read at most once, by the check whether the display fits and the bounded display together
+    for props in ((:limit => true,), (:compact => true,))
+        empty!(eager_reads_per_child)
+        display_with(multi, :displaysize => (24, ncols), props...)
+        @test !isempty(eager_reads_per_child)
+        @test all(==(1), values(eager_reads_per_child))
+    end
+
     # deep nesting
     tree = polygon(2)
     for _ in 1:10_000
@@ -656,9 +678,11 @@ Base.show(io::IO, ::MIME"text/plain", g::EagerGeometry) = print(io, eager_wkt(g)
     # children are named by their kind, not by their type
     collection = GI.GeometryCollection([line(1000), polygon(1000)])
     for ncols in (32, 48), props in ((:limit => true,), (:compact => true,))
+        empty!(eager_reads_per_child)
         shown = display_with(collection, :displaysize => (24, ncols), props...)
         @test occursin("LineString(", shown)
         @test occursin("Polygon(", shown)
         @test !occursin("EagerGeometry", shown)
+        @test all(==(1), values(eager_reads_per_child))
     end
 end

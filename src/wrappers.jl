@@ -203,11 +203,12 @@ for (geomtype, trait, childtype, child_trait, length_check, nesting) in (
             limited = get(io, :limit, false)
             # keep track of how much space we've used + make sure we give this info to any child geoms so they don't go over the limit
             currently_used_space = textwidth(str) + textwidth(extent_str) + textwidth(crs_str)
-            # a foreign geometry with its own display is shown as is, if that fits
-            own_str = (compact || limited) ? _own_str(parent(geom), screen_ncols - currently_used_space - 1) : nothing
             indexed = (compact || limited) && isgeometry(T)
             children = indexed ? nothing : getgeom(trait(geom), geom)
-            child(i) = indexed ? getgeom(geom, i) : children[i]
+            # a foreign geometry with its own display is shown as is, if that fits
+            root = indexed ? _Node(parent(geom)) : nothing
+            own_str = indexed ? _own_str(root, screen_ncols - currently_used_space - 1) : nothing
+            child(i) = indexed ? _child!(root, i) : _Node(children[i])
             if !isnothing(own_str)
                 str *= own_str
             elseif indexed || children isa AbstractVector
@@ -294,10 +295,11 @@ function _children_str(child, n, compact, limited, width)
     available = width - 2 # brackets
     child_width = fld(available, n)
     function render(i)
-        geom = child(i)
+        node = child(i)
+        geom = node.geom
         if (compact || limited) && !(geom isa WrapperGeometry) && isgeometry(geom)
             t = geomtrait(geom)
-            own = t isa PointTrait ? nothing : _own_str(geom, child_width)
+            own = t isa PointTrait ? nothing : _own_str(node, child_width)
             isnothing(own) || return own
             if !(t isa PointTrait) && applicable(geointerface_geomtype, t)
                 name = string(nameof(geointerface_geomtype(t)))
@@ -305,7 +307,7 @@ function _children_str(child, n, compact, limited, width)
                 nchildren = ngeom(t, geom)
                 nchildren == 0 && return name * "([])"
                 remaining <= 2 && return name * "(…)"
-                children = _children_str(k -> getgeom(t, geom, k), nchildren,
+                children = _children_str(k -> _child!(node, k), nchildren,
                     compact, limited, remaining)
                 return name * "(" * children * ")"
             end
@@ -348,28 +350,37 @@ _has_own_show(::Type{T}) where T =
         (Base.moduleroot(parentmodule(which(show, Tuple{IO,MIME"text/plain",T}))) !== Base ||
          Base.moduleroot(parentmodule(which(show, Tuple{IO,T}))) !== Base)
 
+# A geometry and the children of it read so far. Reading a child can be expensive (LibGEOS copies it),
+# so within one `show` the check whether a display fits and the bounded display share the children read.
+mutable struct _Node
+    geom::Any
+    children::Union{Nothing,Dict{Int,_Node}}
+end
+_Node(geom) = _Node(geom, nothing)
+function _child!(node::_Node, i::Int)
+    isnothing(node.children) && (node.children = Dict{Int,_Node}())
+    return get!(() -> _Node(getgeom(geomtrait(node.geom), node.geom, i)), node.children, i)
+end
+
 # Every geometry takes at least one character, so a geometry with more than `width` of them, counted
 # over all siblings and nesting levels, cannot fit. The budget is shared and used up before reading children.
-_may_fit(geom, width::Int) = _may_fit!(Ref(width), geomtrait(geom), geom)
-function _may_fit!(budget, t, geom)
+_may_fit(node::_Node, width::Int) = _may_fit!(Ref(width), node)
+function _may_fit!(budget, node::_Node)
     (budget[] -= 1) >= 0 || return false
+    t = geomtrait(node.geom)
     t isa PointTrait && return true
-    n = ngeom(t, geom)
+    n = ngeom(t, node.geom)
     n <= budget[] || return false
-    for i in 1:n
-        child = getgeom(t, geom, i)
-        _may_fit!(budget, geomtrait(child), child) || return false
-    end
-    return true
+    return all(i -> _may_fit!(budget, _child!(node, i)), 1:n)
 end
 
 # The text/plain display of a foreign geometry if it has its own and fits in `width`, else `nothing`.
 # It is not shown compactly: for e.g. LibGEOS that is just `Polygon(...)`.
-function _own_str(geom, width::Int)
-    width > 0 && _has_own_show(typeof(geom)) && _may_fit(geom, width) || return nothing
+function _own_str(node::_Node, width::Int)
+    width > 0 && _has_own_show(typeof(node.geom)) && _may_fit(node, width) || return nothing
     io = _BudgetIO(IOBuffer(), width)
     try
-        show(IOContext(io, :limit => true, :displaysize => (24, width)), MIME"text/plain"(), geom)
+        show(IOContext(io, :limit => true, :displaysize => (24, width)), MIME"text/plain"(), node.geom)
     catch e
         e isa _BudgetExceeded || rethrow()
         return nothing
