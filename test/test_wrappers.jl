@@ -664,6 +664,14 @@ function Base.show(io::IO, ::MIME"text/plain", g::ModalGeometry)
 end
 
 # A point of which a backend only gives x and y
+# A line that counts and indexes with unsigned integers
+struct UIntLine end
+GI.isgeometry(::Type{UIntLine}) = true
+GI.geomtrait(::UIntLine) = GI.LineStringTrait()
+GI.ngeom(::GI.LineStringTrait, ::UIntLine) = UInt(3)
+GI.ncoord(::GI.LineStringTrait, ::UIntLine) = 2
+GI.getgeom(::GI.LineStringTrait, ::UIntLine, i::Integer) = (Float64(i), 2.0)
+
 struct XYPoint
     x::Float64
     y::Float64
@@ -813,6 +821,12 @@ Base.show(io::IO, ::MIME"text/plain", p::XYPoint) = print(io, "XYPoint(", p.x, "
         shown = display_with(modal(:throws), :displaysize => (24, 120), props...)
         @test occursin("LineString([", shown)
         @test !occursin("OWN DISPLAY", shown)
+    end
+
+    # children are read with the index type the backend counts with
+    @test GI.testgeometry(UIntLine())
+    for props in ((:limit => true,), (:compact => true,))
+        @test occursin("(3.0", display_with(GI.LineString(UIntLine()), :displaysize => (24, 120), props...))
     end
 
     # and a point of which the coordinates cannot be given by index is shown by itself

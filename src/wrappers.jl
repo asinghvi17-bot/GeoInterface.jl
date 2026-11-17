@@ -27,7 +27,6 @@ import ..GeoInterface: AbstractGeometryTrait, AbstractMultiPointTrait, PointTrai
        AbstractCurveTrait, GeometryCollectionTrait, FeatureTrait, FeatureCollectionTrait, PointTuple3,
        PolyhedralSurfaceTrait, TriangleTrait, QuadTrait, PentagonTrait, HexagonTrait, RectangleTrait, TINTrait
 
-import ..GeoInterface: isempty as isemptygeom
 import ..GeoInterface: isgeometry, isfeature, isfeaturecollection, is3d, ismeasured,
        trait, geomtrait, convert, x, y, z, m, extent, crs,
        getgeom, getpoint, getring, gethole, getcoord, coordinates,
@@ -294,6 +293,7 @@ end
 # The string for `n` children, and its width if the children were labeled with the name of a wrapper. How
 # many children are shown, and so read, depends on that width, not on the label or display that is used.
 function _children_str(child, n, compact, limited, width)
+    n = Int(n) # backends may count with other integer types
     n == 0 && return "[]", 2
     spacing = compact ? "" : " "
     available = width - 2 # brackets
@@ -325,7 +325,7 @@ function _children_str(child, n, compact, limited, width)
             end
         end
         shown = _nice_geom_str(geom, false, compact, child_width, limited)
-        return something(_coordinates_str(geom, compact, limited), shown), textwidth(shown)
+        return shown, textwidth(shown)
     end
     first_child, first_width = render(1)
     n == 1 && return "[" * first_child * "]", first_width + 2
@@ -352,25 +352,6 @@ function _kind_name(t, geom)
     applicable(geointerface_geomtype, t) && return string(nameof(geointerface_geomtype(t)))
     t isa AbstractGeometryTrait && return chopsuffix(string(nameof(typeof(t))), "Trait")
     return string(nameof(typeof(geom)))
-end
-
-# Stop writing once more than `left` bytes are written, so showing a huge geometry stays cheap.
-struct _BudgetExceeded <: Exception end
-mutable struct _BudgetIO <: IO
-    buf::IOBuffer
-    left::Int
-end
-function Base.unsafe_write(io::_BudgetIO, p::Ptr{UInt8}, n::UInt)
-    n > io.left && throw(_BudgetExceeded())
-    io.left -= n
-    return unsafe_write(io.buf, p, n)
-end
-Base.isopen(::_BudgetIO) = true
-Base.iswritable(::_BudgetIO) = true
-function Base.write(io::_BudgetIO, x::UInt8)
-    io.left < 1 && throw(_BudgetExceeded())
-    io.left -= 1
-    return write(io.buf, x)
 end
 
 function _has_own_show(::Type{T}) where T
@@ -425,27 +406,12 @@ end
 # It is not shown compactly: for e.g. LibGEOS that is just `Polygon(...)`. Not being able to tell whether
 # it fits, or a display that does not work here, is not an error: the bounded display is used.
 function _own_str(node::_Node, width::Int)
-    width > 0 && _has_own_show(typeof(node.geom)) || return nothing
     try
-        _may_fit(node, width) || return nothing
-        io = _BudgetIO(IOBuffer(), width)
-        show(IOContext(io, :limit => true, :displaysize => (24, width)), MIME"text/plain"(), node.geom)
-        str = String(take!(io.buf))
-        return '\n' in str ? nothing : str
+        width > 0 && _may_fit(node, width) || return nothing
+        str = sprint(show, MIME"text/plain"(), node.geom; context = (:limit => true, :displaysize => (24, width)))
+        # looking for a display is slower than showing, so only do so for what fits
+        return textwidth(str) <= width && !('\n' in str) && _has_own_show(typeof(node.geom)) ? str : nothing
     catch e
-        e isa InterruptException && rethrow()
-        return nothing
-    end
-end
-
-# Foreign points are shown as coordinates, as their compact display may not show them (or is empty
-# for an empty point, which has a number of coordinates but no values).
-function _coordinates_str(geom, compact::Bool, limited::Bool)
-    try
-        (compact || limited) && !(geom isa Union{WrapperGeometry,Tuple,NamedTuple,AbstractVector}) && isgeometry(geom) &&
-            geomtrait(geom) isa PointTrait && ncoord(geom) > 0 && !isemptygeom(geom) || return nothing
-        return repr(Tuple(coordinates(geom)); context = :compact => compact)
-    catch e # not all backends give coordinates by index: use their display
         e isa InterruptException && rethrow()
         return nothing
     end
