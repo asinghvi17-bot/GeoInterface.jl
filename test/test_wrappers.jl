@@ -524,7 +524,7 @@ end
 
     for props in ((:compact => true,), (:limit => true,))
         collection = display_with(GI.GeometryCollection([MyCollection()]), props...)
-        @test occursin("([MyCollection(", collection)
+        @test occursin("([GeometryCollection([LineString(", collection)
         @test occursin("MyEmptyPoint", display_with(GI.MultiPoint([MyEmptyPoint()]), props...))
     end
 
@@ -584,8 +584,8 @@ end
         shown = display_with(triangle, :displaysize => (24, 16), props...)
         @test !occursin(wkt_triangle, shown)
         @test !occursin("(...)", shown)
-        @test !occursin("Wrappers.LinearRing", shown)
-        @test occursin("[WKTLikeGeometry(", shown)
+        @test !occursin("WKTLikeGeometry", shown)
+        @test occursin("([LinearRing(", shown)
         @test occursin("…", shown)
     end
     # large geometries are not rendered in full
@@ -599,4 +599,66 @@ end
     # plain vector wrappers are not affected
     @test display_with(GI.Polygon([[(0, 0), (1, 0), (1, 1), (0, 0)]]), :limit => true) ==
         "Polygon{false, false}([LinearRing([(0, 0), (1, 0), (1, 1), (0, 0)])])"
+end
+
+# A foreign geometry like ArchGDAL's `IGeometry`: one type for all kinds, and an eager display that reads everything.
+struct EagerGeometry{T,C}
+    children::C
+    reads::Base.RefValue{Int}
+end
+EagerGeometry(t, children, reads) = EagerGeometry{typeof(t),typeof(children)}(children, reads)
+GI.isgeometry(::Type{<:EagerGeometry}) = true
+GI.geomtrait(::EagerGeometry{T}) where T = T()
+GI.ngeom(::GI.AbstractGeometryTrait, g::EagerGeometry) = length(g.children)
+function GI.getgeom(::GI.AbstractGeometryTrait, g::EagerGeometry, i)
+    g.reads[] += 1
+    return g.children[i]
+end
+GI.ncoord(::GI.AbstractGeometryTrait, ::EagerGeometry) = 2
+eager_wkt(g::EagerGeometry) = string(replace(string(nameof(typeof(GI.geomtrait(g)))), "Trait" => ""), "(", join(eager_wkt.(GI.getgeom(g)), ", "), ")")
+eager_wkt(p) = join(p, " ")
+Base.show(io::IO, ::MIME"text/plain", g::EagerGeometry) = print(io, eager_wkt(g))
+
+@testset "bounded work for wrapped geometries with an eager display" begin
+    reads = Ref(0)
+    display_with(g, props...) = sprint(io -> show(IOContext(io, props...), MIME"text/plain"(), g))
+    line(n) = EagerGeometry(GI.LineStringTrait(), fill((1, 2), n), reads)
+    polygon(n) = EagerGeometry(GI.PolygonTrait(), [EagerGeometry(GI.LinearRingTrait(), fill((1, 2), n), reads)], reads)
+    ncols = 80
+
+    small = GI.Polygon(polygon(3))
+    reads[] = 0
+    @test occursin(eager_wkt(parent(small)), display_with(small, :limit => true, :displaysize => (24, 120)))
+
+    # a tiny first child must not hide a huge later one
+    multi = GI.MultiPolygon(EagerGeometry(GI.MultiPolygonTrait(), [polygon(1), polygon(100_000)], reads))
+    for props in ((:limit => true,), (:compact => true,))
+        reads[] = 0
+        shown = display_with(multi, :displaysize => (24, ncols), props...)
+        @test reads[] < 2ncols
+        @test occursin("…", shown)
+        @test length(shown) < 2ncols
+    end
+
+    # deep nesting
+    tree = polygon(2)
+    for _ in 1:10_000
+        tree = EagerGeometry(GI.GeometryCollectionTrait(), Any[tree], reads)
+    end
+    nested = GI.GeometryCollection(tree)
+    for props in ((:limit => true,), (:compact => true,))
+        reads[] = 0
+        shown = display_with(nested, :displaysize => (24, ncols), props...)
+        @test reads[] < 2ncols
+        @test length(shown) < 4ncols
+    end
+
+    # children are named by their kind, not by their type
+    collection = GI.GeometryCollection([line(1000), polygon(1000)])
+    for ncols in (32, 48), props in ((:limit => true,), (:compact => true,))
+        shown = display_with(collection, :displaysize => (24, ncols), props...)
+        @test occursin("LineString(", shown)
+        @test occursin("Polygon(", shown)
+        @test !occursin("EagerGeometry", shown)
+    end
 end

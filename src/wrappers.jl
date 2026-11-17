@@ -300,7 +300,7 @@ function _children_str(child, n, compact, limited, width)
             own = t isa PointTrait ? nothing : _own_str(geom, child_width)
             isnothing(own) || return own
             if !(t isa PointTrait) && applicable(geointerface_geomtype, t)
-                name = string(nameof(typeof(geom)))
+                name = string(nameof(geointerface_geomtype(t)))
                 remaining = child_width - textwidth(name) - 2
                 nchildren = ngeom(t, geom)
                 nchildren == 0 && return name * "([])"
@@ -348,17 +348,25 @@ _has_own_show(::Type{T}) where T =
         (Base.moduleroot(parentmodule(which(show, Tuple{IO,MIME"text/plain",T}))) !== Base ||
          Base.moduleroot(parentmodule(which(show, Tuple{IO,T}))) !== Base)
 
-# Every child takes at least one character, so skip looking at the display of geometries with too many.
-_may_fit(::PointTrait, geom, width) = true
-function _may_fit(t, geom, width)
+# Every geometry takes at least one character, so a geometry with more than `width` of them, counted
+# over all siblings and nesting levels, cannot fit. The budget is shared and used up before reading children.
+_may_fit(geom, width::Int) = _may_fit!(Ref(width), geomtrait(geom), geom)
+function _may_fit!(budget, t, geom)
+    (budget[] -= 1) >= 0 || return false
+    t isa PointTrait && return true
     n = ngeom(t, geom)
-    return n <= width && (n == 0 || (child = getgeom(t, geom, 1); _may_fit(geomtrait(child), child, width)))
+    n <= budget[] || return false
+    for i in 1:n
+        child = getgeom(t, geom, i)
+        _may_fit!(budget, geomtrait(child), child) || return false
+    end
+    return true
 end
 
 # The text/plain display of a foreign geometry if it has its own and fits in `width`, else `nothing`.
 # It is not shown compactly: for e.g. LibGEOS that is just `Polygon(...)`.
 function _own_str(geom, width::Int)
-    width > 0 && _has_own_show(typeof(geom)) && _may_fit(geomtrait(geom), geom, width) || return nothing
+    width > 0 && _has_own_show(typeof(geom)) && _may_fit(geom, width) || return nothing
     io = _BudgetIO(IOBuffer(), width)
     try
         show(IOContext(io, :limit => true, :displaysize => (24, width)), MIME"text/plain"(), geom)
