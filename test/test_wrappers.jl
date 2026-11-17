@@ -633,6 +633,18 @@ function Base.show(io::IO, ::MIME"text/plain", g::EagerGeometry)
     end
 end
 
+# A foreign geometry whose display has two lines
+struct MultilineGeometry{T,C}
+    children::C
+end
+MultilineGeometry(t, children) = MultilineGeometry{typeof(t),typeof(children)}(children)
+GI.isgeometry(::Type{<:MultilineGeometry}) = true
+GI.geomtrait(::MultilineGeometry{T}) where T = T()
+GI.ngeom(::GI.AbstractGeometryTrait, g::MultilineGeometry) = length(g.children)
+GI.getgeom(::GI.AbstractGeometryTrait, g::MultilineGeometry, i) = g.children[i]
+GI.ncoord(::GI.AbstractGeometryTrait, ::MultilineGeometry) = 2
+Base.show(io::IO, ::MIME"text/plain", ::MultilineGeometry) = print(io, "first line\nsecond line")
+
 @testset "bounded work for wrapped geometries with an eager display" begin
     reads = Ref(0)
     display_with(g, props...) = sprint(io -> show(IOContext(io, props...), MIME"text/plain"(), g))
@@ -685,4 +697,48 @@ end
         @test !occursin("EagerGeometry", shown)
         @test all(==(1), values(eager_reads_per_child))
     end
+    # a child with a trait that has no wrapper is bounded and named like the others
+    circular(n) = EagerGeometry(GI.CircularStringTrait(), fill((1, 2), n), reads)
+    for props in ((:limit => true,), (:compact => true,))
+        for n in (3, 100_000)
+            collection = GI.GeometryCollection([circular(n), line(1000)])
+            empty!(eager_reads_per_child); reads[] = 0
+            shown = display_with(collection, :displaysize => (24, 60), props...)
+            @test occursin("CircularString(", shown)
+            @test reads[] < 4 * 60
+            @test length(shown) < 4 * 60
+            @test all(==(1), values(eager_reads_per_child))
+        end
+    end
+
+    # a very wide display does not make the check read huge geometries
+    node(g) = GeoInterface.Wrappers._Node(g)
+    cap = GeoInterface.Wrappers.MAX_FIT_GEOMETRIES
+    reads[] = 0
+    @test isnothing(GeoInterface.Wrappers._own_str(node(polygon(20_000)), 100_000))
+    @test reads[] < 2cap
+    @test GeoInterface.Wrappers._own_str(node(polygon(3)), 100_000) == eager_wkt(polygon(3))
+    maxwidth = GeoInterface.Wrappers.MAX_FOREIGN_WIDTH
+    for props in ((:limit => true,), (:compact => true,))
+        reads[] = 0
+        shown = display_with(GI.Polygon(polygon(20_000)), :displaysize => (24, 100_000), props...)
+        @test length(shown) < 2maxwidth
+        @test reads[] < 2maxwidth
+    end
+
+    # a display with several lines is not used
+    multiline = GI.Polygon(MultilineGeometry(GI.PolygonTrait(), [MultilineGeometry(GI.LinearRingTrait(), [(0, 0), (1, 1), (0, 0)])]))
+    for props in ((:limit => true,), (:compact => true,))
+        shown = display_with(multiline, :displaysize => (24, 200), props...)
+        @test !occursin("\n", shown)
+        @test occursin("([LinearRing(", shown)
+    end
+
+    # the extent and crs also take space
+    wktlike = WKTLikeGeometry(GI.PolygonTrait(), [WKTLikeGeometry(GI.LinearRingTrait(), WKTLikeGeometry.(Ref(GI.PointTrait()), [(0, 0), (1, 0), (1, 1), (0, 0)]))])
+    withextent = GI.Polygon(wktlike; extent = Extents.Extent(X = (0, 1), Y = (0, 1)), crs = GeoFormatTypes.EPSG(4326))
+    wide = display_with(withextent, :limit => true, :displaysize => (24, 300))
+    @test occursin("POLYGON ((0 0, 1 0, 1 1, 0 0))", wide) && occursin("extent", wide) && occursin("crs", wide)
+    @test occursin("POLYGON", display_with(withextent, :limit => true, :displaysize => (24, textwidth(wide))))
+    @test !occursin("POLYGON", display_with(withextent, :limit => true, :displaysize => (24, textwidth(wide) - 1)))
 end
